@@ -10,6 +10,34 @@ from vibe_stick.protocol.state import AgentStatus
 from vibe_stick.providers import claude
 
 
+class ClaudeProcessDetectionTests(unittest.TestCase):
+    def _run_with_ps_output(self, output: str) -> bool:
+        completed = mock.Mock(returncode=0, stdout=output)
+        with mock.patch.object(claude.subprocess, "run", return_value=completed):
+            return claude._claude_process_running()
+
+    def test_detects_cli_process_by_bare_executable_name(self) -> None:
+        self.assertTrue(self._run_with_ps_output("claude\n"))
+
+    def test_detects_cli_process_by_full_path(self) -> None:
+        self.assertTrue(self._run_with_ps_output("/usr/local/bin/claude\n"))
+
+    def test_detects_desktop_app_process(self) -> None:
+        self.assertTrue(
+            self._run_with_ps_output("/Applications/Claude.app/Contents/MacOS/Claude\n")
+        )
+
+    def test_does_not_match_unrelated_claude_named_tools(self) -> None:
+        output = (
+            "/Users/x/.nvm/versions/node/v24.12.0/bin/node "
+            "/Users/x/.claude/plugins/cache/claude-hud/claude-hud/0.0.11/dist/index.js\n"
+        )
+        self.assertFalse(self._run_with_ps_output(output))
+
+    def test_no_matching_process_returns_false(self) -> None:
+        self.assertFalse(self._run_with_ps_output("bash\nzsh\n"))
+
+
 class ClaudeProviderTests(unittest.TestCase):
     def test_no_process_reports_offline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

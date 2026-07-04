@@ -136,7 +136,13 @@ def _claude_process_running() -> bool:
         return False
 
     for line in result.stdout.splitlines():
-        if "claude.app/contents/macos/claude" in line.lower():
+        lower = line.strip().lower()
+        if not lower:
+            continue
+        if "claude.app/contents/macos/claude" in lower:
+            return True
+        executable = lower.split()[0].rsplit("/", 1)[-1]
+        if executable == "claude":
             return True
     return False
 
