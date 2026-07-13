@@ -127,6 +127,13 @@ static SemaphoreHandle_t s_lvgl_lock;
 static bool s_wifi_connected;
 static bool s_recording_overlay_visible;
 static bool s_long_press_active;
+static bool s_long_press_wake_only;
+static bool s_screen_on;
+static bool s_state_wake_baseline_ready;
+static int64_t s_screen_awake_until_ms;
+static int64_t s_last_activity_ms;
+static char s_last_wake_status[PROVIDER_COUNT][24];
+static char s_last_wake_alert_event_id[56];
 static char s_last_alert_event_id[56];
 static char s_last_alert_type[24];
 static bool s_alert_sound_baseline_ready;
@@ -392,6 +399,111 @@ static void set_backlight(uint8_t brightness)
 {
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, brightness);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+}
+
+static void wake_screen_for(int64_t duration_ms)
+{
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    set_backlight(LCD_BACKLIGHT_DEFAULT);
+    s_screen_on = true;
+    s_screen_awake_until_ms = now_ms + duration_ms;
+    s_last_activity_ms = now_ms;
+}
+
+static bool wake_screen_for_interaction(void)
+{
+    const bool was_off = !s_screen_on;
+    wake_screen_for(VIBE_STICK_SCREEN_IDLE_MS);
+    return was_off;
+}
+
+static void maybe_sleep_screen(int64_t now_ms)
+{
+    if (!s_screen_on || s_recording_overlay_visible || vibe_audio_is_recording()) {
+        return;
+    }
+    if (now_ms >= s_screen_awake_until_ms) {
+        set_backlight(0);
+        s_screen_on = false;
+        ESP_LOGI(TAG, "screen standby");
+    }
+}
+
+static bool provider_is_busy(void)
+{
+    for (int i = 0; i < PROVIDER_COUNT; ++i) {
+        const char *status = s_provider_states[i].status;
+        if (strcmp(status, "RUNNING") == 0 || strcmp(status, "APPROVAL") == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void maybe_auto_power_off(int64_t now_ms)
+{
+    if (VIBE_STICK_AUTO_POWER_OFF_MS <= 0 ||
+        now_ms - s_last_activity_ms < VIBE_STICK_AUTO_POWER_OFF_MS ||
+        s_state.usb_powered || s_state.battery_charging ||
+        s_recording_overlay_visible || vibe_audio_is_recording() ||
+        provider_is_busy()) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "idle for 60 minutes; shutting down");
+    set_backlight(0);
+    s_screen_on = false;
+    esp_err_t err = vibe_board_shutdown();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "automatic shutdown failed: %s", esp_err_to_name(err));
+        wake_screen_for(VIBE_STICK_SCREEN_EVENT_WAKE_MS);
+    }
+}
+
+static bool status_wakes_screen(const char *status)
+{
+    return strcmp(status, "RUNNING") == 0 ||
+           strcmp(status, "DONE") == 0 ||
+           strcmp(status, "APPROVAL") == 0 ||
+           strcmp(status, "ERROR") == 0;
+}
+
+static void remember_screen_wake_baseline(void)
+{
+    for (int i = 0; i < PROVIDER_COUNT; ++i) {
+        strlcpy(s_last_wake_status[i], s_provider_states[i].status,
+                sizeof(s_last_wake_status[i]));
+    }
+    strlcpy(s_last_wake_alert_event_id, s_state.alert_event_id,
+            sizeof(s_last_wake_alert_event_id));
+    s_state_wake_baseline_ready = true;
+}
+
+static void maybe_wake_screen_for_state_change(void)
+{
+    if (!s_state_wake_baseline_ready) {
+        remember_screen_wake_baseline();
+        return;
+    }
+
+    bool should_wake = false;
+    for (int i = 0; i < PROVIDER_COUNT; ++i) {
+        const char *status = s_provider_states[i].status;
+        if (strcmp(s_last_wake_status[i], status) != 0 && status_wakes_screen(status)) {
+            should_wake = true;
+        }
+    }
+    if (s_state.alert_event_id[0] != '\0' &&
+        strcmp(s_last_wake_alert_event_id, s_state.alert_event_id) != 0 &&
+        strcmp(s_state.alert_type, "NONE") != 0) {
+        should_wake = true;
+    }
+
+    remember_screen_wake_baseline();
+    if (should_wake) {
+        wake_screen_for(VIBE_STICK_SCREEN_EVENT_WAKE_MS);
+        ESP_LOGI(TAG, "screen wake for state change");
+    }
 }
 
 static void init_backlight(void)
@@ -1202,9 +1314,11 @@ static void poll_state(void)
         provider_display_state_t *display_state = current_provider_display_state();
         strlcpy(display_state->status, "OFFLINE", sizeof(display_state->status));
         s_state.wifi = s_wifi_connected;
+        maybe_wake_screen_for_state_change();
         render_state();
         return;
     }
+    maybe_wake_screen_for_state_change();
     render_state();
     maybe_handle_alert();
 }
@@ -1217,6 +1331,7 @@ static void post_simple_event(const char *event_name, const char *path)
     const char *target_path = path ? path : VIBE_STICK_EVENT_PATH;
     esp_err_t err = http_request("POST", target_path, body, response, sizeof(response));
     if (err == ESP_OK && response[0] != '\0' && parse_state_json(response)) {
+        maybe_wake_screen_for_state_change();
         render_state();
     }
 }
@@ -1520,6 +1635,8 @@ static void app_task(void *arg)
     int64_t last_poll = 0;
     while (true) {
         int64_t now_ms = esp_timer_get_time() / 1000;
+        maybe_sleep_screen(now_ms);
+        maybe_auto_power_off(now_ms);
         if (s_wifi_connected && now_ms - last_poll >= VIBE_STICK_STATE_POLL_MS) {
             last_poll = now_ms;
             poll_state();
@@ -1532,20 +1649,41 @@ static void app_task(void *arg)
             poll_state();
             break;
         case VIBE_STICK_EVENT_SHORT_PRESS:
+            if (wake_screen_for_interaction()) {
+                break;
+            }
             post_simple_event("button_short", NULL);
             break;
         case VIBE_STICK_EVENT_DOUBLE_CLICK:
+            if (wake_screen_for_interaction()) {
+                break;
+            }
             post_simple_event("button_double", VIBE_STICK_QUOTA_REFRESH_PATH);
             poll_state();
             break;
         case VIBE_STICK_EVENT_LONG_START:
+            if (wake_screen_for_interaction()) {
+                s_long_press_wake_only = true;
+                break;
+            }
             handle_recording_start();
             break;
         case VIBE_STICK_EVENT_LONG_STOP:
+            if (s_long_press_wake_only) {
+                s_long_press_wake_only = false;
+                wake_screen_for(VIBE_STICK_SCREEN_IDLE_MS);
+                break;
+            }
+            wake_screen_for(VIBE_STICK_SCREEN_IDLE_MS);
             handle_recording_stop();
             break;
         case VIBE_STICK_EVENT_PROVIDER_NEXT:
+            if (wake_screen_for_interaction()) {
+                break;
+            }
             switch_provider();
+            post_simple_event("button_double", VIBE_STICK_QUOTA_REFRESH_PATH);
+            poll_state();
             break;
         }
     }
@@ -1567,6 +1705,7 @@ void app_main(void)
     s_event_queue = xQueueCreate(10, sizeof(agent_event_t));
     s_lvgl_lock = xSemaphoreCreateMutex();
     ESP_ERROR_CHECK(init_display());
+    wake_screen_for(VIBE_STICK_SCREEN_IDLE_MS);
     lvgl_lock();
     create_ui();
     lvgl_unlock();

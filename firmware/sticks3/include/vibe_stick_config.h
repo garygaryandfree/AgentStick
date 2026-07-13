@@ -11,6 +11,9 @@
 #define VIBE_STICK_RECORDING_AUDIO_PATH "/recording/audio"
 #define VIBE_STICK_RECORDING_STOP_PATH "/recording/stop"
 #define VIBE_STICK_STATE_POLL_MS 2000
+#define VIBE_STICK_SCREEN_IDLE_MS 30000
+#define VIBE_STICK_SCREEN_EVENT_WAKE_MS 20000
+#define VIBE_STICK_AUTO_POWER_OFF_MS (60LL * 60LL * 1000LL)
 
 #if __has_include("vibe_stick_secrets.h")
 #include "vibe_stick_secrets.h"

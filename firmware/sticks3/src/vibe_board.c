@@ -13,6 +13,7 @@
 #define M5PM1_REG_PWR_CFG 0x06
 #define M5PM1_REG_HOLD_CFG 0x07
 #define M5PM1_REG_I2C_CFG 0x09
+#define M5PM1_REG_SYS_CMD 0x0C
 #define M5PM1_REG_GPIO_MODE 0x10
 #define M5PM1_REG_GPIO_OUT 0x11
 #define M5PM1_REG_GPIO_IN 0x12
@@ -36,6 +37,7 @@
 #define M5PM1_GPIO_FUNC_MASK(pin) (0x03 << ((pin) * 2))
 #define M5PM1_GPIO_FUNC_GPIO(pin) (0x00 << ((pin) * 2))
 #define M5PM1_GPIO_FUNC_IRQ(pin)  (0x01 << ((pin) * 2))
+#define M5PM1_SYS_CMD_SHUTDOWN 0xA1
 #define I2C_FREQ_HZ 100000
 
 static const char *TAG = "vibe_board";
@@ -236,4 +238,15 @@ esp_err_t vibe_board_speaker_set_enabled(bool enabled)
                         TAG, "speaker gpio out");
     ESP_LOGI(TAG, "speaker amp %s", enabled ? "enabled" : "disabled");
     return ESP_OK;
+}
+
+esp_err_t vibe_board_shutdown(void)
+{
+    ESP_RETURN_ON_FALSE(s_pmic_dev != NULL, ESP_ERR_INVALID_STATE, TAG, "pmic missing");
+
+    // Match the official M5PM1 driver: allow pending I2C work to settle, then
+    // write key 0xA plus command 0x1 to the system command register.
+    esp_rom_delay_us(120000);
+    ESP_LOGI(TAG, "requesting M5PM1 shutdown");
+    return write_reg(M5PM1_REG_SYS_CMD, M5PM1_SYS_CMD_SHUTDOWN);
 }
