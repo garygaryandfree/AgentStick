@@ -23,7 +23,7 @@
 
 #define AUDIO_FRAME_MS 60
 #define AUDIO_FRAME_SAMPLES ((VIBE_STICK_AUDIO_SAMPLE_RATE * AUDIO_FRAME_MS) / 1000)
-#define AUDIO_MAX_SECONDS 45
+#define AUDIO_MAX_SECONDS 120
 #define AUDIO_MAX_BYTES (VIBE_STICK_AUDIO_SAMPLE_RATE * VIBE_STICK_AUDIO_CHANNELS * \
                          (VIBE_STICK_AUDIO_BITS_PER_SAMPLE / 8) * AUDIO_MAX_SECONDS)
 #define TASK_EXIT_WAIT_MS 800
@@ -49,7 +49,7 @@ static const audio_codec_data_if_t *s_data_if;
 static const audio_codec_gpio_if_t *s_gpio_if;
 static const audio_codec_if_t *s_codec_if;
 static uint8_t *s_audio_buffer;
-static size_t s_audio_len;
+static atomic_size_t s_audio_len;
 static size_t s_audio_capacity;
 
 static esp_err_t init_i2s(bool enable_tx, bool enable_rx)
@@ -336,15 +336,17 @@ static void audio_task(void *arg)
             ESP_LOGW(TAG, "codec read failed: %s", esp_err_to_name(err));
             continue;
         }
-        if (s_audio_len + sizeof(frame) <= s_audio_capacity) {
-            memcpy(s_audio_buffer + s_audio_len, frame, sizeof(frame));
-            s_audio_len += sizeof(frame);
+        size_t audio_len = atomic_load_explicit(&s_audio_len, memory_order_acquire);
+        if (audio_len + sizeof(frame) <= s_audio_capacity) {
+            memcpy(s_audio_buffer + audio_len, frame, sizeof(frame));
+            atomic_store_explicit(&s_audio_len, audio_len + sizeof(frame), memory_order_release);
         } else {
             dropped += sizeof(frame);
         }
     }
 
-    ESP_LOGI(TAG, "recorded %u bytes dropped=%u", (unsigned)s_audio_len, (unsigned)dropped);
+    ESP_LOGI(TAG, "recorded %u bytes dropped=%u",
+             (unsigned)atomic_load(&s_audio_len), (unsigned)dropped);
     release_session_resources();
     s_audio_task = NULL;
     vTaskDelete(NULL);
@@ -384,7 +386,7 @@ esp_err_t vibe_audio_start(void)
         xSemaphoreGive(s_audio_mutex);
         ESP_RETURN_ON_FALSE(false, ESP_ERR_NO_MEM, TAG, "audio buffer");
     }
-    s_audio_len = 0;
+    atomic_store(&s_audio_len, 0);
 
     esp_err_t err = init_i2s(false, true);
     if (err != ESP_OK) {
@@ -429,6 +431,19 @@ esp_err_t vibe_audio_stop(void)
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     return ESP_OK;
+}
+
+esp_err_t vibe_audio_shutdown(void)
+{
+    esp_err_t stop_err = vibe_audio_stop();
+    if (s_audio_mutex && xSemaphoreTake(s_audio_mutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+        release_session_resources();
+        vibe_audio_clear();
+        s_initialized = false;
+        xSemaphoreGive(s_audio_mutex);
+    }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(vibe_board_speaker_set_enabled(false));
+    return stop_err;
 }
 
 bool vibe_audio_is_recording(void)
@@ -484,9 +499,26 @@ esp_err_t vibe_audio_play_sound(agent_sound_t sound)
 const uint8_t *vibe_audio_data(size_t *len)
 {
     if (len) {
-        *len = s_audio_len;
+        *len = atomic_load_explicit(&s_audio_len, memory_order_acquire);
     }
     return s_audio_buffer;
+}
+
+esp_err_t vibe_audio_chunk(size_t offset, size_t max_len,
+                           const uint8_t **data, size_t *len)
+{
+    ESP_RETURN_ON_FALSE(data != NULL && len != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "null chunk output");
+    size_t total = atomic_load_explicit(&s_audio_len, memory_order_acquire);
+    if (!s_audio_buffer || offset >= total || max_len == 0) {
+        *data = NULL;
+        *len = 0;
+        return ESP_OK;
+    }
+    size_t available = total - offset;
+    *len = available < max_len ? available : max_len;
+    *data = s_audio_buffer + offset;
+    return ESP_OK;
 }
 
 void vibe_audio_clear(void)
@@ -495,6 +527,6 @@ void vibe_audio_clear(void)
         heap_caps_free(s_audio_buffer);
         s_audio_buffer = NULL;
     }
-    s_audio_len = 0;
+    atomic_store(&s_audio_len, 0);
     s_audio_capacity = 0;
 }

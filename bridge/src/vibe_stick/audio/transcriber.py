@@ -7,6 +7,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+import wave
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,10 @@ from vibe_stick.config.paths import APP_SUPPORT_DIR
 GROQ_ASR_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_ASR_MODEL = "whisper-large-v3-turbo"
 DEFAULT_ASR_LANGUAGE = "zh"
+DEFAULT_FUNASR_BASE_URL = "ws://127.0.0.1:10095"
+FUNASR_AUDIO_CHUNK_BYTES = 1920
+
+_hotword_cache: tuple[float, dict[str, int], dict[str, str]] | None = None
 
 
 @dataclass
@@ -109,7 +114,10 @@ class TranscriptionAdapter:
             )
 
         config = _load_asr_config()
-        if config.get("provider") not in {"groq", "openai-compatible"} or not config.get("api_key"):
+        provider = config.get("provider")
+        if provider == "local-funasr" and config.get("base_url"):
+            return _transcribe_funasr(audio_file, config)
+        if provider not in {"groq", "openai-compatible"} or not config.get("api_key"):
             return TranscriptionResult(
                 success=False,
                 message="No transcription adapter configured",
@@ -194,6 +202,10 @@ def _config_from_generic_env() -> dict[str, str]:
         base_url = base_url or GROQ_ASR_BASE_URL
         model = model or os.environ.get("VIBE_STICK_GROQ_MODEL", DEFAULT_ASR_MODEL).strip()
         language = language or os.environ.get("VIBE_STICK_GROQ_LANGUAGE", DEFAULT_ASR_LANGUAGE).strip()
+    elif provider == "local-funasr":
+        base_url = base_url or DEFAULT_FUNASR_BASE_URL
+        model = model or "paraformer-zh-streaming"
+        language = language or DEFAULT_ASR_LANGUAGE
     else:
         model = model or DEFAULT_ASR_MODEL
         language = language or DEFAULT_ASR_LANGUAGE
@@ -220,6 +232,10 @@ def _config_from_toml(data: dict[str, Any]) -> dict[str, str]:
         base_url = base_url or GROQ_ASR_BASE_URL
         model = str(data.get("groq_model") or model or DEFAULT_ASR_MODEL).strip()
         language = str(data.get("groq_language") or language or DEFAULT_ASR_LANGUAGE).strip()
+    elif provider == "local-funasr":
+        base_url = base_url or DEFAULT_FUNASR_BASE_URL
+        model = model or "paraformer-zh-streaming"
+        language = language or DEFAULT_ASR_LANGUAGE
     elif provider == "openai-compatible":
         model = model or DEFAULT_ASR_MODEL
         language = language or DEFAULT_ASR_LANGUAGE
@@ -253,6 +269,8 @@ def _asr_config(
 
 def _normalize_asr_provider(raw: object) -> str:
     value = str(raw or "").strip().lower()
+    if value in {"funasr", "local-funasr", "local_funasr"}:
+        return "local-funasr"
     if value in {"groq", "openai-compatible"}:
         return value
     return ""
@@ -309,7 +327,7 @@ def _transcribe_openai_compatible_once(
         headers={
             "Authorization": f"Bearer {config['api_key']}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "User-Agent": "VibeStick/0.1 macOS",
+            "User-Agent": "VibeStick/0.1",
             "Connection": "close",
         },
     )
@@ -350,7 +368,200 @@ def _transcription_url(base_url: str) -> str:
 
 
 def _asr_label(provider: str) -> str:
-    return "Groq" if provider == "groq" else "OpenAI-compatible"
+    if provider == "groq":
+        return "Groq"
+    if provider == "local-funasr":
+        return "Local FunASR"
+    return "OpenAI-compatible"
+
+
+def _transcribe_funasr(audio_file: Path, config: dict[str, str]) -> TranscriptionResult:
+    last_result = TranscriptionResult(
+        success=False,
+        message="Local FunASR transcription failed",
+        source="local-funasr",
+    )
+    for attempt in range(1, _asr_attempt_count() + 1):
+        result = _transcribe_funasr_once(audio_file, config, attempt)
+        if result.success:
+            return result
+        last_result = result
+        if attempt < _asr_attempt_count():
+            time.sleep(min(0.5, 0.15 * attempt))
+    return last_result
+
+
+def _transcribe_funasr_once(
+    audio_file: Path,
+    config: dict[str, str],
+    attempt: int,
+    connector=None,  # noqa: ANN001
+) -> TranscriptionResult:
+    try:
+        with wave.open(str(audio_file), "rb") as wav_file:
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            sample_rate = wav_file.getframerate()
+            compression = wav_file.getcomptype()
+            audio = wav_file.readframes(wav_file.getnframes())
+    except (OSError, EOFError, wave.Error) as exc:
+        return TranscriptionResult(
+            success=False,
+            message=f"Could not read WAV audio file: {exc}",
+            source="local-funasr",
+        )
+    if channels != 1 or sample_width != 2 or compression != "NONE":
+        return TranscriptionResult(
+            success=False,
+            message="Local FunASR requires mono PCM16 WAV audio",
+            source="local-funasr",
+        )
+    if not audio:
+        return TranscriptionResult(
+            success=False,
+            message="Local FunASR received an empty recording",
+            source="local-funasr",
+        )
+
+    if connector is None:
+        try:
+            from websockets.sync.client import connect as connector
+        except ImportError:
+            return TranscriptionResult(
+                success=False,
+                message="Local FunASR requires the 'websockets' package",
+                source="local-funasr",
+            )
+
+    hotwords, normalizations = _load_funasr_hotwords()
+    start_message = {
+        "mode": "2pass",
+        "chunk_size": [5, 10, 5],
+        "chunk_interval": 10,
+        "encoder_chunk_look_back": 4,
+        "decoder_chunk_look_back": 0,
+        "audio_fs": sample_rate,
+        "wav_name": audio_file.name,
+        "wav_format": "pcm",
+        "is_speaking": True,
+        "hotwords": json.dumps(hotwords, ensure_ascii=False) if hotwords else "",
+        "itn": True,
+    }
+    timeout = _asr_timeout_seconds()
+    chunk_delay = _funasr_chunk_delay_seconds()
+    messages: list[dict[str, Any]] = []
+    try:
+        with connector(
+            config["base_url"],
+            subprotocols=["binary"],
+            ping_interval=None,
+            max_size=None,
+            open_timeout=min(8, timeout),
+            close_timeout=3,
+        ) as websocket:
+            websocket.send(json.dumps(start_message, ensure_ascii=False))
+            for offset in range(0, len(audio), FUNASR_AUDIO_CHUNK_BYTES):
+                websocket.send(audio[offset : offset + FUNASR_AUDIO_CHUNK_BYTES])
+                if chunk_delay:
+                    time.sleep(chunk_delay)
+            websocket.send(json.dumps({"is_speaking": False}))
+
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                raw_message = websocket.recv(timeout=max(0.05, deadline - time.monotonic()))
+                payload = json.loads(raw_message)
+                if isinstance(payload, dict):
+                    messages.append(payload)
+                    if payload.get("is_final"):
+                        break
+    except (OSError, TimeoutError, ValueError, json.JSONDecodeError) as exc:
+        return TranscriptionResult(
+            success=False,
+            message=f"Local FunASR transcription failed on attempt {attempt}: {exc}",
+            source="local-funasr",
+        )
+
+    transcript = _funasr_final_text(messages)
+    transcript = _apply_funasr_normalizations(transcript, normalizations)
+    if not transcript:
+        return TranscriptionResult(
+            success=False,
+            message="Local FunASR returned no transcript",
+            source="local-funasr",
+        )
+    return TranscriptionResult(
+        text=transcript,
+        success=True,
+        message="Transcript supplied by Local FunASR ASR",
+        source="local-funasr",
+    )
+
+
+def _funasr_final_text(messages: list[dict[str, Any]]) -> str:
+    offline = ""
+    online = ""
+    for message in messages:
+        text = str(message.get("text") or "").strip()
+        if not text:
+            continue
+        if message.get("mode") == "2pass-offline":
+            offline = _merge_funasr_text(offline, text)
+        elif message.get("mode") == "2pass-online":
+            online += text
+    return (offline or online).strip()
+
+
+def _merge_funasr_text(previous: str, current: str) -> str:
+    if not previous or current.startswith(previous):
+        return current
+    if previous.startswith(current):
+        return previous
+    max_overlap = min(len(previous), len(current))
+    for size in range(max_overlap, 0, -1):
+        if previous[-size:] == current[:size]:
+            return previous + current[size:]
+    return previous + current
+
+
+def _load_funasr_hotwords() -> tuple[dict[str, int], dict[str, str]]:
+    global _hotword_cache
+    url = os.environ.get("VIBE_STICK_FUNASR_HOTWORDS_URL", "").strip()
+    if not url:
+        return {}, {}
+    now = time.monotonic()
+    if _hotword_cache and now - _hotword_cache[0] < 300:
+        return _hotword_cache[1], _hotword_cache[2]
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        hotwords = {
+            str(word): int(weight)
+            for word, weight in dict(payload.get("hotwords") or {}).items()
+        }
+        normalizations = {
+            str(source): str(target)
+            for source, target in dict(payload.get("normalizations") or {}).items()
+        }
+        _hotword_cache = (now, hotwords, normalizations)
+        return hotwords, normalizations
+    except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
+        return {}, {}
+
+
+def _apply_funasr_normalizations(text: str, normalizations: dict[str, str]) -> str:
+    for source in sorted(normalizations, key=len, reverse=True):
+        text = text.replace(source, normalizations[source])
+        text = text.replace(source.lower(), normalizations[source])
+    return text
+
+
+def _funasr_chunk_delay_seconds() -> float:
+    raw = os.environ.get("VIBE_STICK_FUNASR_CHUNK_DELAY_MS", "2")
+    try:
+        delay_ms = float(raw)
+    except ValueError:
+        delay_ms = 2.0
+    return max(0.0, min(60.0, delay_ms)) / 1000.0
 
 
 def _discard_http_error_body(exc: urllib.error.HTTPError) -> None:

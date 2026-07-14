@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import platform
 import signal
 import struct
 import subprocess
@@ -15,9 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from vibe_stick.audio.transcriber import TranscriptionAdapter
+from vibe_stick.audio.streaming import FunASRStreamingSession
 from vibe_stick.config.paths import RECORDINGS_DIR
 from vibe_stick.desktop.hud import hide_hud, show_hud
-from vibe_stick.paste.input_injector import MacPasteInjector
+from vibe_stick.paste.input_injector import PasteInjector
 
 MIN_AUDIO_DURATION_SECONDS = 0.7
 MIN_AUDIO_RMS = 120.0
@@ -63,10 +65,11 @@ class AudioMetrics:
 class RecordingController:
     """project-owned push-to-talk session boundary."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, paste_injector: PasteInjector | None = None) -> None:
         self.path = path
         self.transcriber = TranscriptionAdapter()
-        self.paste_injector = MacPasteInjector()
+        self.paste_injector = paste_injector or PasteInjector()
+        self.streaming = FunASRStreamingSession(self.paste_injector)
         self.audio_recorder = MacMicRecorder()
         self.session = self._load()
 
@@ -84,8 +87,12 @@ class RecordingController:
         )
         use_mac_mic = "sticks3" not in requested_source.lower()
         if not use_mac_mic:
-            self.session.audio_source = "sticks3_pcm"
-            self.session.message = "Waiting for StickS3 audio upload"
+            if self.streaming.start(self.session.session_id):
+                self.session.audio_source = "sticks3_pcm_stream"
+                self.session.message = "StickS3 streaming transcription started"
+            else:
+                self.session.audio_source = "sticks3_pcm"
+                self.session.message = "Streaming unavailable; waiting for complete StickS3 audio"
             show_hud("listening")
 
         mic_result = self.audio_recorder.start(self.session.session_id) if use_mac_mic else None
@@ -106,12 +113,35 @@ class RecordingController:
         hook = _run_command_hook("VIBE_STICK_RECORDING_START_CMD", self.session.to_jsonable(), timeout=15)
         if hook is not None and not hook[0]:
             self.audio_recorder.stop()
+            if self.session.audio_source == "sticks3_pcm_stream":
+                self.streaming.abort(rollback=True)
             self.session.active = False
             self.session.stopped_at = datetime.now().isoformat(timespec="seconds")
             self.session.status = "start_failed"
             self.session.message = hook[2] or "Recording start command failed"
             show_hud("failed", hold_seconds=1.8)
         self._save()
+        return self.session
+
+    def attach_pcm_chunk(self, pcm: bytes, *, session_id: str = "") -> RecordingSession:
+        session_id = _clean_session_id(session_id)
+        if not pcm:
+            self.session.status = "audio_failed"
+            self.session.message = "Streaming audio chunk was empty"
+        elif not self.session.active or session_id != self.session.session_id:
+            self.session.status = "audio_failed"
+            self.session.message = "Streaming audio session did not match the active recording"
+        elif self.session.audio_source != "sticks3_pcm_stream" or not self.streaming.active:
+            self.session.status = "stream_unavailable"
+            self.session.message = "StickS3 streaming session is unavailable"
+        elif not self.streaming.append(pcm):
+            self.session.status = "audio_failed"
+            self.session.message = "StickS3 streaming audio could not be forwarded"
+        else:
+            self.session.status = "recording"
+            self.session.message = "StickS3 streaming audio received"
+        if self.session.status != "recording":
+            self._save()
         return self.session
 
     def attach_pcm(
@@ -123,6 +153,8 @@ class RecordingController:
         channels: int = 1,
         bits_per_sample: int = 16,
     ) -> RecordingSession:
+        if self.session.audio_source == "sticks3_pcm_stream":
+            self.streaming.abort(rollback=True)
         if not pcm:
             self.session.status = "audio_failed"
             self.session.message = "Uploaded audio was empty"
@@ -173,6 +205,30 @@ class RecordingController:
         self.session.active = False
         self.session.stopped_at = datetime.now().isoformat(timespec="seconds")
         explicit_text = str(request.get("text") or request.get("transcript") or "")
+        if self.session.audio_source == "sticks3_pcm_stream":
+            stream_result = self.streaming.stop()
+            if stream_result.audio:
+                self.session.audio_file = str(
+                    self._write_sticks3_wav(self.session.session_id, stream_result.audio)
+                )
+            self.session.transcript = stream_result.text
+            self.session.transcript_source = "local-funasr-stream"
+            self.session.pasted = stream_result.success and stream_result.input_success
+            if self.session.pasted:
+                self.session.status = "pasted"
+                self.session.message = stream_result.message
+                hide_hud(delay_seconds=0.5)
+            elif stream_result.text:
+                self.session.status = "paste_failed"
+                self.session.message = stream_result.message
+                show_hud("failed", hold_seconds=1.8)
+            else:
+                self.session.status = "audio_skipped"
+                self.session.message = stream_result.message
+                show_hud("unclear", hold_seconds=1.8)
+            self._save_stop_result()
+            return self.session
+
         mic_stop = self.audio_recorder.stop()
         if mic_stop is not None:
             ok, audio_file, message = mic_stop
@@ -293,6 +349,31 @@ class RecordingController:
             show_hud("failed", hold_seconds=1.8)
         self._save_stop_result()
         return self.session
+
+    def abort_stale_stream(self, message: str) -> RecordingSession:
+        """Close an orphaned StickS3 stream without rewriting entered text."""
+        if self.session.audio_source == "sticks3_pcm_stream":
+            self.streaming.abort(rollback=False)
+        elif self.session.active:
+            self.audio_recorder.stop()
+        self.session.active = False
+        self.session.stopped_at = datetime.now().isoformat(timespec="seconds")
+        self.session.status = "stream_timeout"
+        self.session.message = message
+        self.session.pasted = False
+        self._save_stop_result()
+        return self.session
+
+    @staticmethod
+    def _write_sticks3_wav(session_id: str, pcm: bytes) -> Path:
+        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        audio_file = RECORDINGS_DIR / f"{session_id or uuid.uuid4().hex}.wav"
+        with wave.open(str(audio_file), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(16000)
+            wav.writeframes(pcm)
+        return audio_file
 
     def _load(self) -> RecordingSession:
         try:
@@ -446,6 +527,8 @@ class MacMicRecorder:
         self.audio_file: Path | None = None
 
     def start(self, session_id: str) -> tuple[bool, Path | None, str] | None:
+        if platform.system() != "Darwin":
+            return None
         if os.environ.get("VIBE_STICK_RECORDING_USE_MAC_MIC", "1").strip().lower() in {"0", "false", "no", "off"}:
             return None
         if self.process and self.process.poll() is None:

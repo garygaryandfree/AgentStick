@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -31,6 +31,7 @@ class CodexState:
     quota_7d_remaining: int | None = None
     quota_updated_at: str = ""
     quota_stale: bool = False
+    account_name: str = ""
 
 
 @dataclass
@@ -44,6 +45,7 @@ class ProviderState:
     quota_7d_remaining: int | None = None
     quota_updated_at: str = ""
     quota_stale: bool = False
+    account_name: str = ""
 
 
 @dataclass
@@ -63,6 +65,7 @@ class VibeStickState:
     provider: ProviderState
     codex: CodexState
     alert: AlertState
+    providers: dict[str, ProviderState] = field(default_factory=dict)
 
     def to_jsonable(self) -> dict[str, Any]:
         data = asdict(self)
@@ -70,6 +73,8 @@ class VibeStickState:
         data["provider"]["status"] = self.provider.status.value
         data["codex"]["status"] = self.codex.status.value
         data["alert"]["type"] = self.alert.type.value
+        for provider_id, provider in self.providers.items():
+            data["providers"][provider_id]["status"] = provider.status.value
         return data
 
 
@@ -83,6 +88,7 @@ def event_id(prefix: str) -> str:
 
 def state_from_dict(data: dict[str, Any]) -> VibeStickState:
     provider_data = data.get("provider", {})
+    providers_data = data.get("providers", {})
     codex_data = data.get("codex", {})
     codex_data = codex_data if isinstance(codex_data, dict) else {}
     alert_data = data.get("alert", {})
@@ -102,11 +108,17 @@ def state_from_dict(data: dict[str, Any]) -> VibeStickState:
             quota_7d_remaining=codex_data.get("quota_7d_remaining"),
             quota_updated_at=str(codex_data.get("quota_updated_at") or ""),
             quota_stale=bool(codex_data.get("quota_stale", False)),
+            account_name=str(codex_data.get("account_name") or ""),
         ),
         alert=AlertState(
             event_id=str(alert_data.get("event_id") or ""),
             type=AlertType(alert_data.get("type", AlertType.NONE.value)),
             message=str(alert_data.get("message") or ""),
+        ),
+        providers=_providers_from_dict(
+            providers_data if isinstance(providers_data, dict) else {},
+            provider_state,
+            codex_data,
         ),
     )
 
@@ -123,6 +135,7 @@ def _provider_state_from_dict(provider_data: dict[str, Any], codex_data: dict[st
             quota_7d_remaining=provider_data.get("quota_7d_remaining"),
             quota_updated_at=str(provider_data.get("quota_updated_at") or ""),
             quota_stale=bool(provider_data.get("quota_stale", False)),
+            account_name=str(provider_data.get("account_name") or ""),
         )
 
     return ProviderState(
@@ -135,7 +148,26 @@ def _provider_state_from_dict(provider_data: dict[str, Any], codex_data: dict[st
         quota_7d_remaining=codex_data.get("quota_7d_remaining"),
         quota_updated_at=str(codex_data.get("quota_updated_at") or ""),
         quota_stale=bool(codex_data.get("quota_stale", False)),
+        account_name=str(codex_data.get("account_name") or ""),
     )
+
+
+def _providers_from_dict(
+    providers_data: dict[str, Any],
+    active_provider: ProviderState,
+    codex_data: dict[str, Any],
+) -> dict[str, ProviderState]:
+    providers: dict[str, ProviderState] = {}
+    for provider_id, raw_provider in providers_data.items():
+        if not isinstance(raw_provider, dict):
+            continue
+        normalized = dict(raw_provider)
+        normalized.setdefault("id", str(provider_id))
+        providers[str(provider_id)] = _provider_state_from_dict(normalized, codex_data)
+    providers.setdefault(active_provider.id, active_provider)
+    if "codex" not in providers and codex_data:
+        providers["codex"] = _provider_state_from_dict({}, codex_data)
+    return providers
 
 
 def default_state() -> VibeStickState:
@@ -146,6 +178,7 @@ def default_state() -> VibeStickState:
         quota_7d_remaining=None,
         quota_updated_at="",
         quota_stale=False,
+        account_name="",
     )
     return VibeStickState(
         time=now_time_text(),
@@ -163,7 +196,9 @@ def default_state() -> VibeStickState:
             quota_7d_remaining=codex.quota_7d_remaining,
             quota_updated_at=codex.quota_updated_at,
             quota_stale=codex.quota_stale,
+            account_name=codex.account_name,
         ),
         codex=codex,
         alert=AlertState(event_id="", type=AlertType.NONE, message=""),
+        providers={},
     )

@@ -22,6 +22,7 @@ class ProviderObservation:
     alert_message: str
     alert_event_id: str
     latest_event_timestamp: datetime | None = None
+    account_name: str = ""
 
 
 class Provider(Protocol):

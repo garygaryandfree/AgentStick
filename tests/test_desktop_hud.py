@@ -22,7 +22,7 @@ class DesktopHudTests(unittest.TestCase):
                 ):
                     hud.show_hud("listening")
 
-            primary = json.loads(primary_state.read_text())
+            primary = json.loads(primary_state.read_text(encoding="utf-8"))
 
         self.assertEqual(primary["status"], "listening")
         self.assertEqual(primary["text"], "正在聆听")

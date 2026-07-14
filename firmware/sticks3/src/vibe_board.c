@@ -13,6 +13,7 @@
 #define M5PM1_REG_PWR_CFG 0x06
 #define M5PM1_REG_HOLD_CFG 0x07
 #define M5PM1_REG_I2C_CFG 0x09
+#define M5PM1_REG_SYS_CMD 0x0C
 #define M5PM1_REG_GPIO_MODE 0x10
 #define M5PM1_REG_GPIO_OUT 0x11
 #define M5PM1_REG_GPIO_IN 0x12
@@ -36,6 +37,7 @@
 #define M5PM1_GPIO_FUNC_MASK(pin) (0x03 << ((pin) * 2))
 #define M5PM1_GPIO_FUNC_GPIO(pin) (0x00 << ((pin) * 2))
 #define M5PM1_GPIO_FUNC_IRQ(pin)  (0x01 << ((pin) * 2))
+#define M5PM1_SYS_CMD_SHUTDOWN 0xA1
 #define I2C_FREQ_HZ 100000
 
 static const char *TAG = "vibe_board";
@@ -136,8 +138,10 @@ esp_err_t vibe_board_init_power(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(write_reg(M5PM1_REG_PWR_CFG,
                                             (pwr_cfg | M5PM1_PWR_CFG_LDO_EN) &
                                                 ~M5PM1_PWR_CFG_LED_CTRL));
+    // The firmware doesn't use IMU wake. Keeping LDO_HOLD set would leave the
+    // IMU rail powered after shutdown and slowly drain the battery.
     ESP_ERROR_CHECK_WITHOUT_ABORT(write_reg(M5PM1_REG_HOLD_CFG,
-                                            hold_cfg | M5PM1_HOLD_CFG_LDO_HOLD));
+                                            hold_cfg & ~M5PM1_HOLD_CFG_LDO_HOLD));
     ESP_ERROR_CHECK_WITHOUT_ABORT(update_reg(M5PM1_REG_GPIO_FUNC0,
                                              M5PM1_GPIO2_L3B_POWER_EN, 0));
     ESP_ERROR_CHECK_WITHOUT_ABORT(update_reg(M5PM1_REG_GPIO_MODE,
@@ -161,7 +165,7 @@ esp_err_t vibe_board_init_power(void)
                                              M5PM1_GPIO_FUNC_MASK(1),
                                              M5PM1_GPIO_FUNC_IRQ(1)));
 
-    ESP_LOGI(TAG, "power hold enabled");
+    ESP_LOGI(TAG, "active peripheral rails enabled; shutdown IMU hold disabled");
     return ESP_OK;
 }
 
@@ -236,4 +240,48 @@ esp_err_t vibe_board_speaker_set_enabled(bool enabled)
                         TAG, "speaker gpio out");
     ESP_LOGI(TAG, "speaker amp %s", enabled ? "enabled" : "disabled");
     return ESP_OK;
+}
+
+esp_err_t vibe_board_prepare_shutdown(void)
+{
+    ESP_RETURN_ON_FALSE(s_pmic_dev != NULL, ESP_ERR_INVALID_STATE, TAG, "pmic missing");
+
+    esp_err_t first_error = ESP_OK;
+    esp_err_t err = vibe_board_speaker_set_enabled(false);
+    if (err != ESP_OK) {
+        first_error = err;
+        ESP_LOGW(TAG, "speaker power off failed: %s", esp_err_to_name(err));
+    }
+
+    // L3B supplies LCD, microphone and speaker. It isn't cascaded with the
+    // ESP rail, so explicitly turn it off before asking the PMIC to shut down.
+    err = update_reg(M5PM1_REG_GPIO_OUT, M5PM1_GPIO2_L3B_POWER_EN, 0);
+    if (err != ESP_OK && first_error == ESP_OK) {
+        first_error = err;
+    }
+
+    // L1 supplies the IMU. Clear its shutdown hold and switch it off because
+    // VibeStick doesn't use motion wake.
+    err = update_reg(M5PM1_REG_HOLD_CFG, M5PM1_HOLD_CFG_LDO_HOLD, 0);
+    if (err != ESP_OK && first_error == ESP_OK) {
+        first_error = err;
+    }
+    err = update_reg(M5PM1_REG_PWR_CFG, M5PM1_PWR_CFG_LDO_EN, 0);
+    if (err != ESP_OK && first_error == ESP_OK) {
+        first_error = err;
+    }
+
+    ESP_LOGI(TAG, "peripheral rails prepared for shutdown");
+    return first_error;
+}
+
+esp_err_t vibe_board_shutdown(void)
+{
+    ESP_RETURN_ON_FALSE(s_pmic_dev != NULL, ESP_ERR_INVALID_STATE, TAG, "pmic missing");
+
+    // Match the official M5PM1 driver: allow pending I2C work to settle, then
+    // write key 0xA plus command 0x1 to the system command register.
+    esp_rom_delay_us(120000);
+    ESP_LOGI(TAG, "requesting M5PM1 shutdown");
+    return write_reg(M5PM1_REG_SYS_CMD, M5PM1_SYS_CMD_SHUTDOWN);
 }

@@ -1,9 +1,9 @@
 [project]
 name = "vibestick"
-version = "0.1.4"
+version = "0.1.6"
 description = "Local VibeStick Bridge service for VibeStick."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["websockets>=15,<17"]
 
 [project.scripts]
 vibestick-bridge = "vibe_stick.__main__:main"

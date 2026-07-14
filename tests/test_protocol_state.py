@@ -57,6 +57,34 @@ class ProtocolStateTests(unittest.TestCase):
         self.assertEqual(payload["provider"]["id"], "claude")
         self.assertEqual(payload["provider"]["status"], "ERROR")
 
+    def test_provider_cache_serializes_both_accounts(self) -> None:
+        state = default_state()
+        state.providers = {
+            "codex": ProviderState(
+                id="codex",
+                display_name="Codex",
+                status=AgentStatus.IDLE,
+                account_name="52#",
+                quota_5h_remaining=100,
+                quota_7d_remaining=55,
+            ),
+            "claude": ProviderState(
+                id="claude",
+                display_name="Claude",
+                status=AgentStatus.OFFLINE,
+                account_name="29#",
+                quota_5h_remaining=100,
+                quota_7d_remaining=80,
+            ),
+        }
+
+        payload = state.to_jsonable()
+
+        self.assertEqual(payload["providers"]["codex"]["account_name"], "52#")
+        self.assertEqual(payload["providers"]["claude"]["status"], "OFFLINE")
+        restored = state_from_dict(payload)
+        self.assertEqual(restored.providers["claude"].quota_7d_remaining, 80)
+
 
 if __name__ == "__main__":
     unittest.main()
