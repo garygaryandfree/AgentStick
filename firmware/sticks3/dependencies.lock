@@ -1,4 +1,18 @@
 dependencies:
+  espressif/bmi270:
+    component_hash: a234ece0bea3595c45bb75f80449b823b366ca677aed6e3d4c35f14c90c4ace5
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.2'
+    - name: espressif/sensor_hub
+      registry_url: https://components.espressif.com
+      require: public
+      version: ^0.1.4
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.1.0
   espressif/button:
     component_hash: ad64de1d1b8aa139564810a8519b2f1ac275a560a512479ee94c1b6983469d4b
     dependencies:
@@ -14,7 +28,7 @@ dependencies:
       type: service
     version: 4.2.0
   espressif/cmake_utilities:
-    component_hash: 05165f30922b422b4b90c08845e6d449329b97370fbd06309803d8cb539d79e3
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
     dependencies:
     - name: idf
       require: private
@@ -22,7 +36,7 @@ dependencies:
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.1.1
+    version: 0.5.3
   espressif/esp_codec_dev:
     component_hash: 896c67360ae1f8dedaf8a53dfe48c015317fa455f061a5165307892296990028
     dependencies:
@@ -33,10 +47,42 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.5.10
+  espressif/i2c_bus:
+    component_hash: 483112c1619c54c38d0b734fb25f1678733267858a77b7af2f48cc7db6dbbd84
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: idf
+      require: private
+      version: '>=4.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.5.2
+  espressif/sensor_hub:
+    component_hash: ea30db551c34aee2862482abf8b3164dd3855ecb4b4659b1e6878455c9cb9e22
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.*
+    - name: espressif/i2c_bus
+      registry_url: https://components.espressif.com
+      require: public
+      version: 1.*
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.1.5
   idf:
     source:
       type: idf
-    version: 5.5.1
+    version: 5.5.0
   lvgl/lvgl:
     component_hash: 2409fdc84e9766d2a18afd84b051aef3f838348136cdb1c10ac2e8bcdb012bf6
     dependencies: []
@@ -45,9 +91,10 @@ dependencies:
       type: service
     version: 9.2.0
 direct_dependencies:
+- espressif/bmi270
 - espressif/button
 - espressif/esp_codec_dev
 - lvgl/lvgl
-manifest_hash: 0a75e552b8ec3c0f9aba37aab09da16f82f0bc1a64efd8ca5e40476f563598f8
+manifest_hash: 0d961453551635fe630863dc7b0655df21c5fd120ed8f242b069173865313191
 target: esp32s3
 version: 2.0.0

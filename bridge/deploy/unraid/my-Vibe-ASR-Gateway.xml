@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>Vibe-ASR-Gateway</Name>
+  <Repository>python:3.12-alpine</Repository>
+  <Registry>https://hub.docker.com/_/python</Registry>
+  <Network>bridge</Network>
+  <MyIP />
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/GaryGaryyy/VibeStick/issues</Support>
+  <Project>https://github.com/GaryGaryyy/VibeStick</Project>
+  <Overview>VibeStick S3 audio gateway, FunASR hotword API, and persistent Windows text-input relay. Keeps the established local Windows ASR path unchanged.</Overview>
+  <Category>Tools:Utilities</Category>
+  <WebUI />
+  <TemplateURL />
+  <Icon>/state/plugins/dynamix.docker.manager/images/Vibe-ASR-Gateway-icon.png</Icon>
+  <ExtraParams>--restart unless-stopped</ExtraParams>
+  <PostArgs>/config/gateway/start.sh</PostArgs>
+  <CPUset />
+  <DonateText />
+  <DonateLink />
+  <Requires>FunASR-2pass must be reachable at ws://192.168.31.100:10095. Intended for trusted LAN use.</Requires>
+  <Config Name="S3 Bridge Port" Target="8765" Default="8765" Mode="tcp" Description="VibeStick S3 HTTP audio upload" Type="Port" Display="always" Required="true" Mask="false">8765</Config>
+  <Config Name="Hotword API Port" Target="10096" Default="10096" Mode="tcp" Description="Shared FunASR hotword API" Type="Port" Display="always" Required="true" Mask="false">10096</Config>
+  <Config Name="Windows Input Relay Port" Target="10097" Default="10097" Mode="tcp" Description="Persistent outbound Windows client relay" Type="Port" Display="always" Required="true" Mask="false">10097</Config>
+  <Config Name="FunASR Appdata" Target="/config" Default="/mnt/user/appdata/FunASR-2pass" Mode="rw" Description="Gateway code, persistent state, hotwords and rules" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/FunASR-2pass</Config>
+  <Config Name="Pairing Token" Target="VIBE_STICK_BRIDGE_TOKEN" Default="" Mode="" Description="Shared S3 and Windows relay token" Type="Variable" Display="always" Required="true" Mask="true">__VIBE_STICK_BRIDGE_TOKEN__</Config>
+  <Config Name="Sub2 Usage Token" Target="VIBE_STICK_SUB2_USAGE_TOKEN" Default="" Mode="" Description="Server-side token for Codex and Claude quota retrieval" Type="Variable" Display="always" Required="false" Mask="true"></Config>
+  <Config Name="Sub2 Usage Base URL" Target="VIBE_STICK_SUB2_USAGE_BASE_URL" Default="https://88api.ai/sub2-usage" Mode="" Description="Sub2-Usage API base URL" Type="Variable" Display="advanced" Required="true" Mask="false">https://88api.ai/sub2-usage</Config>
+  <Config Name="Codex Usage Account" Target="VIBE_STICK_SUB2_CODEX_ACCOUNT_ID" Default="52" Mode="" Description="Sub2 gpt-plus account id" Type="Variable" Display="advanced" Required="true" Mask="false">52</Config>
+  <Config Name="Claude Usage Account" Target="VIBE_STICK_SUB2_CLAUDE_ACCOUNT_ID" Default="29" Mode="" Description="Sub2 Claude account id" Type="Variable" Display="advanced" Required="true" Mask="false">29</Config>
+  <Config Name="Usage Refresh Seconds" Target="VIBE_STICK_SUB2_USAGE_INTERVAL_SECONDS" Default="60" Mode="" Description="Background quota refresh interval" Type="Variable" Display="advanced" Required="true" Mask="false">60</Config>
+  <Config Name="ASR Provider" Target="VIBE_STICK_ASR_PROVIDER" Default="local-funasr" Mode="" Description="Local streaming FunASR adapter" Type="Variable" Display="advanced" Required="true" Mask="false">local-funasr</Config>
+  <Config Name="ASR WebSocket" Target="VIBE_STICK_ASR_BASE_URL" Default="ws://192.168.31.100:10095" Mode="" Description="FunASR 2pass WebSocket endpoint" Type="Variable" Display="advanced" Required="true" Mask="false">ws://192.168.31.100:10095</Config>
+  <Config Name="ASR Model" Target="VIBE_STICK_ASR_MODEL" Default="paraformer-zh-streaming" Mode="" Description="Recognition model label" Type="Variable" Display="advanced" Required="true" Mask="false">paraformer-zh-streaming</Config>
+  <Config Name="ASR Language" Target="VIBE_STICK_ASR_LANGUAGE" Default="zh" Mode="" Description="Recognition language" Type="Variable" Display="advanced" Required="true" Mask="false">zh</Config>
+  <Config Name="Hotword URL" Target="VIBE_STICK_FUNASR_HOTWORDS_URL" Default="http://127.0.0.1:10096/api/hotwords" Mode="" Description="In-container hotword API" Type="Variable" Display="advanced" Required="true" Mask="false">http://127.0.0.1:10096/api/hotwords</Config>
+  <Config Name="Input Relay Port" Target="VIBE_STICK_INPUT_RELAY_PORT" Default="10097" Mode="" Description="Gateway relay listener" Type="Variable" Display="advanced" Required="true" Mask="false">10097</Config>
+  <Config Name="Application Data" Target="VIBE_STICK_APP_SUPPORT_DIR" Default="/config/gateway/data" Mode="" Description="Gateway runtime state and recordings" Type="Variable" Display="advanced" Required="true" Mask="false">/config/gateway/data</Config>
+  <Config Name="Final Calibration Wait" Target="VIBE_STICK_STREAM_FINAL_WAIT_SECONDS" Default="0.55" Mode="" Description="Seconds to wait for final FunASR calibration" Type="Variable" Display="advanced" Required="true" Mask="false">0.55</Config>
+  <Config Name="Maximum Recording Bytes" Target="VIBE_STICK_MAX_RECORDING_AUDIO_BYTES" Default="8000000" Mode="" Description="Supports long StickS3 dictation sessions" Type="Variable" Display="advanced" Required="true" Mask="false">8000000</Config>
+  <Config Name="Recording Idle Timeout" Target="VIBE_STICK_RECORDING_IDLE_TIMEOUT_SECONDS" Default="4" Mode="" Description="Abort an orphaned S3 session when audio chunks stop" Type="Variable" Display="advanced" Required="true" Mask="false">4</Config>
+  <Config Name="Maximum Recording Seconds" Target="VIBE_STICK_RECORDING_MAX_SECONDS" Default="125" Mode="" Description="Server-side failsafe for a stuck S3 recording" Type="Variable" Display="advanced" Required="true" Mask="false">125</Config>
+  <Config Name="Hotword File" Target="HOTWORD_FILE" Default="/config/hotwords.txt" Mode="" Description="Persistent shared hotword list" Type="Variable" Display="advanced" Required="true" Mask="false">/config/hotwords.txt</Config>
+  <Config Name="Mac Microphone" Target="VIBE_STICK_RECORDING_USE_MAC_MIC" Default="0" Mode="" Description="Disabled in the Linux container" Type="Variable" Display="advanced" Required="true" Mask="false">0</Config>
+</Container>

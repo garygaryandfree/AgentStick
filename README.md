@@ -10,6 +10,10 @@ VibeStick turns an M5Stack StickS3 into a tiny desktop companion for coding agen
 
 VibeStick targets M5Stack StickS3 hardware and is not an official M5Stack project. Third-party agent names such as Codex and Claude describe compatible local tools and integrations only.
 
+This branch can fetch Codex and Claude 5H/7D remaining quota through Sub2-Usage on the server-side Bridge. The token never enters the firmware; StickS3 shows `account_name` when available and falls back to the configured account id.
+
+Current integrated firmware/Bridge record: [VibeStick 0.1.6](docs/releases/0.1.6.md).
+
 ## What you'll need (prepare first)
 
 - [ ] M5Stack StickS3 and a USB-C data cable.
@@ -23,6 +27,21 @@ Building the firmware needs ESP-IDF v5.5.x — a one-time toolchain install (~1 
 ## Install
 
 You can do this manually, or hand the command steps to an AI coding agent such as Claude Code and Codex.
+
+### Windows bridge quick start
+
+Windows supports the Python bridge, local Codex / Claude observation, StickS3 audio uploads, and automatic paste into the focused window. The macOS HUD and Mac microphone fallback remain macOS-only; on Windows, voice input uses audio uploaded by the StickS3.
+
+Run in PowerShell:
+
+```powershell
+git clone https://github.com/GaryGaryyy/VibeStick.git
+cd VibeStick
+.\scripts\setup.ps1
+.\scripts\dev.ps1
+```
+
+Edit Wi-Fi values in `firmware\sticks3\include\vibe_stick_secrets.h` and the ASR key in `.env` before using the device. Allow private-network access if Windows Firewall prompts, then open `http://127.0.0.1:8765/health` to verify the bridge. Firmware builds still require ESP-IDF v5.5.x; use Espressif's Windows Installation Manager and run `idf.py build flash` from an ESP-IDF PowerShell.
 
 > Legend: steps marked 👤 are PHYSICAL steps that need a human to act directly, such as plugging in the cable, long-pressing or short-pressing the power button, and granting macOS permissions in System Settings. AI agents should run the shell steps in order, then pause at each 👤 step and ask the user to complete it before continuing.
 
@@ -169,7 +188,25 @@ Empty values in `.env` generally mean "use the built-in default". `scripts/dev.s
 - `VIBE_STICK_RECORDING_USE_MAC_MIC`: set to `0` to disable Mac microphone fallback.
 - `VIBE_STICK_AUTO_ENTER`: set to `1` to press Return after pasting.
 
-### ASR option 1: SiliconFlow (recommended default)
+### StickS3 power behavior
+
+- The screen backlight turns off after 30 seconds; this is standby, not power-off.
+- On battery, 60 minutes without interaction triggers PMIC power-off. Wi-Fi, audio, LCD and the unused IMU rail are released first; deep sleep is used if the PMIC rail doesn't cut successfully.
+- Double-click the side reset/power button for hardware power-off. Long-pressing it enters download mode and still consumes power while waiting to be flashed.
+
+### ASR option 1: LAN FunASR (lowest latency)
+
+This sends the completed StickS3 WAV to a FunASR WebSocket service on the LAN. It needs no API key and can load hotwords and normalization rules from the companion hotword API.
+
+```sh
+VIBE_STICK_ASR_PROVIDER=local-funasr
+VIBE_STICK_ASR_BASE_URL=ws://192.168.31.100:10095
+VIBE_STICK_FUNASR_HOTWORDS_URL=http://192.168.31.100:10096/api/hotwords
+VIBE_STICK_FUNASR_CHUNK_DELAY_MS=2
+VIBE_STICK_ASR_LANGUAGE=zh
+```
+
+### ASR option 2: SiliconFlow
 
 ```sh
 VIBE_STICK_ASR_PROVIDER=openai-compatible
@@ -183,7 +220,7 @@ VIBE_STICK_ASR_ATTEMPTS=2
 
 Audio sent to a cloud ASR provider leaves the Mac.
 
-### ASR option 2: any OpenAI-compatible provider
+### ASR option 3: any OpenAI-compatible provider
 
 Use any provider that accepts `POST {base_url}/audio/transcriptions`.
 
@@ -203,7 +240,7 @@ VIBE_STICK_ASR_API_KEY=your-groq-key
 
 The legacy aliases `VIBE_STICK_GROQ_API_KEY`, `VIBE_STICK_GROQ_MODEL`, and `VIBE_STICK_GROQ_LANGUAGE` remain supported.
 
-### ASR option 3: local command (offline)
+### ASR option 4: local command (offline)
 
 ```sh
 VIBE_STICK_TRANSCRIBE_CMD=/path/to/transcribe-command

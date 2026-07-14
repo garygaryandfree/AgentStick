@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -198,12 +199,20 @@ def _is_newer(value: datetime, other: datetime | None) -> bool:
 
 
 def _codex_process_running() -> bool:
+    command = ["ps", "-axo", "command="]
+    if platform.system() == "Windows":
+        command = [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Get-Process | ForEach-Object { $_.ProcessName }",
+        ]
     try:
         result = subprocess.run(
-            ["ps", "-axo", "command="],
+            command,
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -211,11 +220,16 @@ def _codex_process_running() -> bool:
     if result.returncode != 0:
         return False
 
-    for line in result.stdout.splitlines():
-        lower = line.lower()
+    for line in (result.stdout or "").splitlines():
+        lower = line.lower().replace("\\", "/")
         if "/applications/codex.app/" in lower:
             return True
         if "codex app-server" in lower:
+            return True
+        executable = lower.split()[0].strip('"').rsplit("/", 1)[-1]
+        if executable in {"codex", "codex.exe", "codex.cmd"}:
+            return True
+        if "codex.exe" in lower or "codex.cmd" in lower:
             return True
     return False
 

@@ -1,4 +1,5 @@
 import os
+import threading
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -7,6 +8,7 @@ from vibe_stick.protocol.state import AgentStatus, ProviderState, default_state
 from vibe_stick.codex.quota import QuotaSnapshot
 from vibe_stick.providers.base import ProviderObservation
 from vibe_stick.server import app
+from vibe_stick.usage.sub2 import Sub2UsageSnapshot
 
 
 class ServerProviderTests(unittest.TestCase):
@@ -90,6 +92,52 @@ class ServerProviderTests(unittest.TestCase):
             self.assertEqual(app._claude_usage_interval_seconds(), 30)
         with mock.patch.dict(os.environ, {"VIBE_STICK_CLAUDE_USAGE_INTERVAL_SECONDS": "90"}):
             self.assertEqual(app._claude_usage_interval_seconds(), 90)
+
+    def test_sub2_usage_interval_has_minimum(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(app._sub2_usage_interval_seconds(), 60)
+        with mock.patch.dict(os.environ, {"VIBE_STICK_SUB2_USAGE_INTERVAL_SECONDS": "5"}):
+            self.assertEqual(app._sub2_usage_interval_seconds(), 30)
+
+    def test_sub2_snapshot_overrides_quota_and_falls_back_to_account_id(self) -> None:
+        store = app.BridgeStateStore.__new__(app.BridgeStateStore)
+        store._sub2_usage_interval = 60
+        store._sub2_usage_snapshots = {
+            "codex": Sub2UsageSnapshot("codex", 52, "", 100, 55, "12:34")
+        }
+        store._sub2_usage_snapshot_times = {"codex": app.time.monotonic()}
+        observation = self._obs("codex")
+
+        store._apply_sub2_usage(observation)
+
+        self.assertEqual(observation.account_name, "52#")
+        self.assertEqual(observation.quota_5h_remaining, 100)
+        self.assertEqual(observation.quota_7d_remaining, 55)
+        self.assertFalse(observation.quota_stale)
+
+    def test_windows_provider_status_overrides_unraid_local_observer(self) -> None:
+        store = app.BridgeStateStore.__new__(app.BridgeStateStore)
+        store._lock = threading.RLock()
+        store._remote_provider_observations = {}
+        store._remote_provider_seen_at = {}
+        store.update_provider_status(
+            {
+                "provider": "claude",
+                "status": "DONE",
+                "project": "demo",
+                "alert_type": "DONE",
+                "alert_event_id": "evt_claude_done_1",
+                "alert_message": "Claude task completed",
+            }
+        )
+
+        observation = store._remote_provider_observation(
+            "claude", self._obs("claude", online=False, status=AgentStatus.OFFLINE)
+        )
+
+        self.assertTrue(observation.online)
+        self.assertEqual(observation.status, AgentStatus.DONE)
+        self.assertEqual(observation.alert_event_id, "evt_claude_done_1")
 
     def test_failed_claude_usage_refresh_keeps_cached_quota_stale(self) -> None:
         store = app.BridgeStateStore.__new__(app.BridgeStateStore)

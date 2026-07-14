@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -122,12 +123,20 @@ def observe_claude(project_root: Path) -> ProviderObservation:
 
 
 def _claude_process_running() -> bool:
+    command = ["ps", "-axo", "command="]
+    if platform.system() == "Windows":
+        command = [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Get-Process | ForEach-Object { $_.ProcessName }",
+        ]
     try:
         result = subprocess.run(
-            ["ps", "-axo", "command="],
+            command,
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=2,
         )
     except (OSError, subprocess.TimeoutExpired):
@@ -135,14 +144,18 @@ def _claude_process_running() -> bool:
     if result.returncode != 0:
         return False
 
-    for line in result.stdout.splitlines():
+    for line in (result.stdout or "").splitlines():
         lower = line.strip().lower()
         if not lower:
             continue
         if "claude.app/contents/macos/claude" in lower:
             return True
-        executable = lower.split()[0].rsplit("/", 1)[-1]
-        if executable == "claude":
+        executable = lower.split()[0].strip('"').replace("\\", "/").rsplit("/", 1)[-1]
+        if executable in {"claude", "claude.exe", "claude.cmd"}:
+            return True
+        if "claude.exe" in lower or "claude.cmd" in lower:
+            return True
+        if "@anthropic-ai/claude-code" in lower or "claude-code/cli.js" in lower.replace("\\", "/"):
             return True
     return False
 

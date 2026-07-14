@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from unittest import mock
 
@@ -22,6 +23,85 @@ class _FakeResponse:
 
 
 class TranscriberConfigTests(unittest.TestCase):
+    def test_local_funasr_config_does_not_require_api_key(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "VIBE_STICK_ASR_PROVIDER": "local-funasr",
+                "VIBE_STICK_ASR_BASE_URL": "ws://192.168.31.100:10095",
+            },
+            clear=True,
+        ):
+            config = transcriber._load_asr_config()
+
+        self.assertEqual(config["provider"], "local-funasr")
+        self.assertEqual(config["base_url"], "ws://192.168.31.100:10095")
+        self.assertEqual(config["api_key"], "")
+
+    def test_local_funasr_sends_pcm_and_uses_offline_result(self) -> None:
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.sent: list[object] = []
+                self.messages = iter(
+                    [
+                        '{"mode":"2pass-online","text":"Linux"}',
+                        '{"mode":"2pass-offline","text":"linux GitHub","is_final":true}',
+                    ]
+                )
+
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+            def send(self, payload: object) -> None:
+                self.sent.append(payload)
+
+            def recv(self, timeout=None):  # noqa: ANN001, ANN201
+                return next(self.messages)
+
+        socket = FakeSocket()
+
+        def connector(uri, **kwargs):  # noqa: ANN001, ANN201
+            self.assertEqual(uri, "ws://funasr.test:10095")
+            self.assertEqual(kwargs["subprotocols"], ["binary"])
+            return socket
+
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "sample.wav"
+            with wave.open(str(audio), "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16000)
+                wav_file.writeframes(b"\x01\x00" * 1920)
+
+            with mock.patch.object(
+                transcriber,
+                "_load_funasr_hotwords",
+                return_value=({"linux": 35}, {"linux": "Linux"}),
+            ):
+                with mock.patch.object(transcriber, "_funasr_chunk_delay_seconds", return_value=0):
+                    result = transcriber._transcribe_funasr_once(
+                        audio,
+                        {
+                            "provider": "local-funasr",
+                            "base_url": "ws://funasr.test:10095",
+                            "api_key": "",
+                            "model": "paraformer-zh-streaming",
+                            "language": "zh",
+                        },
+                        attempt=1,
+                        connector=connector,
+                    )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.source, "local-funasr")
+        self.assertEqual(result.text, "Linux GitHub")
+        self.assertIsInstance(socket.sent[0], str)
+        self.assertTrue(any(isinstance(item, bytes) for item in socket.sent))
+        self.assertEqual(socket.sent[-1], '{"is_speaking": false}')
+
     def test_load_asr_config_reads_vibestick_asr_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
